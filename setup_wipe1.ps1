@@ -1,6 +1,6 @@
-# ============================================
+# =========================================# ============================================
 # WINDOWS DISK WIPE SETUP
-# Version: 2.0 (WinRM Remote Trigger)
+# Version: 2.1 (Fixed Shortcut + Admin Check)
 # ============================================
 
 $ErrorActionPreference = 'Stop'
@@ -8,6 +8,16 @@ $ErrorActionPreference = 'Stop'
 Write-Host "========================================"  -ForegroundColor Cyan
 Write-Host "WINDOWS DISK WIPE SETUP" -ForegroundColor Cyan
 Write-Host "========================================"  -ForegroundColor Cyan
+
+# Check Admin rights
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "`nERROR: This script requires Administrator privileges!" -ForegroundColor Red
+    Write-Host "Right-click PowerShell -> Run as Administrator" -ForegroundColor Yellow
+    Write-Host "`nPress any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
+}
 
 try {
     # 1. Scripts
@@ -95,19 +105,52 @@ wpeutil reboot
     
     Write-Host "[7/8] WinRM configured." -ForegroundColor Green
 
-    # 8. Shortcut
+    # 8. Shortcut (with error handling)
     Write-Host "[8/8] Creating shortcut..." -ForegroundColor Yellow
-    $WshShell = New-Object -comObject WScript.Shell
-    $ShortcutPath = "$env:USERPROFILE\Desktop\WipeNow.lnk"
-    $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
-    $Shortcut.TargetPath = "C:\Scripts\doom.bat"
-    $Shortcut.Save()
     try {
-        $bytes = [System.IO.File]::ReadAllBytes($ShortcutPath)
-        $bytes[0x15] = $bytes[0x15] -bor 0x20
-        [System.IO.File]::WriteAllBytes($ShortcutPath, $bytes)
-    } catch {}
-    Write-Host "[8/8] Shortcut created." -ForegroundColor Green
+        # Try multiple desktop paths
+        $desktopPath = $null
+        $possiblePaths = @(
+            "$env:USERPROFILE\Desktop",
+            "$env:PUBLIC\Desktop",
+            [Environment]::GetFolderPath("Desktop")
+        )
+        
+        foreach ($path in $possiblePaths) {
+            if ($path -and (Test-Path $path)) {
+                $desktopPath = $path
+                break
+            }
+        }
+        
+        if (-not $desktopPath) {
+            # Create Desktop folder if doesn't exist
+            $desktopPath = "$env:USERPROFILE\Desktop"
+            New-Item -Path $desktopPath -ItemType Directory -Force | Out-Null
+        }
+        
+        $ShortcutPath = "$desktopPath\WipeNow.lnk"
+        $WshShell = New-Object -comObject WScript.Shell
+        $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
+        $Shortcut.TargetPath = "C:\Scripts\doom.bat"
+        $Shortcut.WorkingDirectory = "C:\Scripts"
+        $Shortcut.Description = "Wipe all disks and reboot"
+        $Shortcut.Save()
+        
+        # Set "Run as Administrator" flag
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($ShortcutPath)
+            $bytes[0x15] = $bytes[0x15] -bor 0x20
+            [System.IO.File]::WriteAllBytes($ShortcutPath, $bytes)
+        } catch {
+            # Ignore if can't set admin flag
+        }
+        
+        Write-Host "[8/8] Shortcut created: $ShortcutPath" -ForegroundColor Green
+    } catch {
+        Write-Host "[8/8] Shortcut creation skipped (not critical)." -ForegroundColor Yellow
+        Write-Host "       Use C:\Scripts\doom.bat directly." -ForegroundColor Gray
+    }
 
     # Cleanup
     Remove-Item -Path C:\mount -Recurse -Force -ErrorAction SilentlyContinue
@@ -133,6 +176,7 @@ wpeutil reboot
     
     Write-Host "`nLOCAL TRIGGER:" -ForegroundColor Cyan
     Write-Host "  Double-click: Desktop\WipeNow.lnk" -ForegroundColor White
+    Write-Host "  Or run: C:\Scripts\doom.bat" -ForegroundColor White
     
     Write-Host "`nREMOTE TRIGGER (PowerShell on HOST):" -ForegroundColor Cyan
     Write-Host "  Copy-paste this command:" -ForegroundColor Yellow
@@ -175,6 +219,11 @@ Invoke-Command -ComputerName $hostname -Credential `$cred -ScriptBlock { C:\Scri
     Write-Host "Command saved to: $configFile" -ForegroundColor Green
 
 } catch {
-    Write-Error "CRITICAL ERROR: $($_.Exception.Message)"
+    Write-Host "`nCRITICAL ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Yellow
     dism /unmount-wim /mountdir:C:\mount\winre /discard 2>$null | Out-Null
+    Write-Host "`nPress any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
 }
+
